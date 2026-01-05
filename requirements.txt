@@ -1,0 +1,7 @@
+pyrogram==2.0.106
+tgcrypto==1.2.5
+pymongo[srv]==4.6.1
+google-generativeai==0.4.1
+python-dotenv==1.0.1
+dnspython==2.5.0
+pytz==2024.1
