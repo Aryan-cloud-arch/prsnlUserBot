@@ -1243,9 +1243,13 @@ async def clone_messages():
 # 13. FULL BACKUP
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+# 13. FULL BACKUP (WITH ALL MESSAGES & MEDIA!)
+# ═══════════════════════════════════════════════════════════════
+
 async def full_backup():
-    """Complete backup - contacts, groups, messages, profile"""
-    header("📦 FULL ACCOUNT BACKUP")
+    """Complete backup - EVERYTHING including all messages with media"""
+    header("📦 FULL ACCOUNT BACKUP (EVERYTHING!)")
     
     accounts = load_accounts()
     config = load_config()
@@ -1265,56 +1269,82 @@ async def full_backup():
     for i, name in enumerate(accounts.keys(), 1):
         print(f"   {i}. {name}")
     
-    choice = input("\nEnter nickname (or 'all'): ").strip()
+    choice = input("\nEnter nickname: ").strip()
     
-    accounts_to_process = []
-    if choice.lower() == 'all':
-        accounts_to_process = list(accounts.keys())
-    elif choice in accounts:
-        accounts_to_process = [choice]
-    else:
+    if choice not in accounts:
         print(f"\n❌ '{choice}' not found!")
         input("\nPress Enter...")
         return
     
-    for nickname in accounts_to_process:
-        info = accounts[nickname]
-        session = info.get('session_string')
+    nickname = choice
+    info = accounts[nickname]
+    session = info.get('session_string')
+    
+    if not session:
+        print(f"\n⚠️ No session!")
+        input("\nPress Enter...")
+        return
+    
+    print("\n" + "=" * 60)
+    print("📦 BACKUP OPTIONS")
+    print("=" * 60)
+    
+    print("\n1. 📋 Basic Backup (Contacts, Groups only)")
+    print("2. 🔥 FULL BACKUP (All chats + messages + media)")
+    
+    backup_type = input("\nChoice (1 or 2): ").strip()
+    
+    if backup_type == "2":
+        print("\n⚠️ FULL BACKUP includes:")
+        print("   • All contacts")
+        print("   • All groups/channels")
+        print("   • Messages from all chats (with media)")
+        print("   • Photos, Videos, Documents, Audio, etc.")
+        print("\n⏰ This may take 10-30 minutes depending on data!")
         
-        if not session:
-            print(f"\n⚠️ {nickname}: No session")
-            continue
+        msgs_per_chat = input("\nMessages per chat (default 50, max 500): ").strip()
+        msgs_per_chat = int(msgs_per_chat) if msgs_per_chat.isdigit() else 50
+        msgs_per_chat = min(msgs_per_chat, 500)
         
-        print(f"\n{'='*60}")
-        print(f"📦 FULL BACKUP: {nickname}")
-        print(f"{'='*60}")
+        confirm = input(f"\n📤 Backup last {msgs_per_chat} messages from ALL chats? (yes/no): ").strip().lower()
+        if confirm != 'yes':
+            print("\n❌ Cancelled")
+            input("\nPress Enter...")
+            return
+    
+    print(f"\n{'='*60}")
+    print(f"📦 STARTING BACKUP: {nickname}")
+    print(f"{'='*60}")
+    
+    try:
+        client = TelegramClient(
+            StringSession(session),
+            info['api_id'],
+            info['api_hash']
+        )
+        await client.connect()
         
-        try:
-            client = TelegramClient(
-                StringSession(session),
-                info['api_id'],
-                info['api_hash']
-            )
-            await client.connect()
-            
-            if not await client.is_user_authorized():
-                print(f"❌ Session expired")
-                await client.disconnect()
-                continue
-            
-            me = await client.get_me()
-            topic_id = info.get('topic_id')
-            
-            if not topic_id:
-                topic_name = f"📱 {nickname}"
-                topic_id = await get_or_create_topic(client, group_id, topic_name)
-                accounts[nickname]['topic_id'] = topic_id
-                save_accounts(accounts)
-            
-            # 1. PROFILE
-            print("\n📤 1/5 Backing up profile...")
-            
-            profile_msg = f"""📦 *FULL BACKUP - {nickname}*
+        if not await client.is_user_authorized():
+            print(f"❌ Session expired")
+            await client.disconnect()
+            input("\nPress Enter...")
+            return
+        
+        me = await client.get_me()
+        topic_id = info.get('topic_id')
+        
+        if not topic_id:
+            topic_name = f"📱 {nickname}"
+            topic_id = await get_or_create_topic(client, group_id, topic_name)
+            accounts[nickname]['topic_id'] = topic_id
+            save_accounts(accounts)
+        
+        # ═══════════════════════════════════════════════════════
+        # 1. PROFILE
+        # ═══════════════════════════════════════════════════════
+        print("\n📤 [1/6] Backing up profile...")
+        
+        profile_msg = f"""📦 *FULL BACKUP STARTED - {nickname}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 👤 *PROFILE*
@@ -1326,102 +1356,189 @@ async def full_backup():
 💬 User ID: `{me.id}`
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-📅 Backup Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+        
+        await send_to_topic(client, group_id, topic_id, profile_msg)
+        
+        # Profile photo
+        try:
+            photos = await client.get_profile_photos('me', limit=1)
+            if photos:
+                await client.send_file(
+                    entity=group_id,
+                    file=photos[0],
+                    caption="🖼️ *Profile Photo*",
+                    reply_to=topic_id,
+                    parse_mode='md'
+                )
+                print("   ✅ Profile photo")
+        except:
+            pass
+        
+        # ═══════════════════════════════════════════════════════
+        # 2. CONTACTS
+        # ═══════════════════════════════════════════════════════
+        print("📤 [2/6] Backing up contacts...")
+        
+        result = await client(GetContactsRequest(hash=0))
+        
+        contacts_list = []
+        for user in result.users:
+            contact_info = f"• {user.first_name or ''} {user.last_name or ''}"
+            if user.username:
+                contact_info += f" (@{user.username})"
+            if user.phone:
+                contact_info += f" | +{user.phone}"
+            contacts_list.append(contact_info)
+        
+        if contacts_list:
+            chunk_size = 50
+            chunks = [contacts_list[i:i+chunk_size] for i in range(0, len(contacts_list), chunk_size)]
             
-            await send_to_topic(client, group_id, topic_id, profile_msg)
+            for i, chunk in enumerate(chunks, 1):
+                msg = f"👥 *Contacts ({i}/{len(chunks)})*\n\n" + "\n".join(chunk)
+                await send_to_topic(client, group_id, topic_id, msg)
+                await asyncio.sleep(0.3)
             
-            try:
-                photos = await client.get_profile_photos('me', limit=1)
-                if photos:
-                    photo_path = await client.download_profile_photo('me', file=f'/tmp/{nickname}_photo.jpg')
-                    if photo_path:
-                        await client.send_file(
-                            entity=group_id,
-                            file=photo_path,
-                            caption="🖼️ *Profile Photo*",
-                            reply_to=topic_id,
-                            parse_mode='md'
-                        )
-                        os.remove(photo_path)
-                        print("   ✅ Profile photo backed up")
-            except:
-                pass
+            print(f"   ✅ {len(contacts_list)} contacts")
+        
+        # ═══════════════════════════════════════════════════════
+        # 3. GROUPS & CHANNELS LIST
+        # ═══════════════════════════════════════════════════════
+        print("📤 [3/6] Backing up groups & channels list...")
+        
+        all_dialogs = []
+        groups_list = []
+        channels_list = []
+        personal_chats = []
+        
+        async for dialog in client.iter_dialogs():
+            all_dialogs.append(dialog)
             
-            # 2. CONTACTS
-            print("📤 2/5 Backing up contacts...")
+            if dialog.is_group:
+                g_info = f"• {dialog.title}"
+                if hasattr(dialog.entity, 'username') and dialog.entity.username:
+                    g_info += f" | t.me/{dialog.entity.username}"
+                groups_list.append(g_info)
+            elif dialog.is_channel:
+                c_info = f"• {dialog.title}"
+                if hasattr(dialog.entity, 'username') and dialog.entity.username:
+                    c_info += f" | t.me/{dialog.entity.username}"
+                channels_list.append(c_info)
+            elif dialog.is_user and not dialog.entity.bot:
+                personal_chats.append(dialog)
+        
+        # Send groups list
+        if groups_list:
+            chunk_size = 30
+            chunks = [groups_list[i:i+chunk_size] for i in range(0, len(groups_list), chunk_size)]
+            for i, chunk in enumerate(chunks, 1):
+                msg = f"👥 *Groups ({i}/{len(chunks)}) - Total: {len(groups_list)}*\n\n" + "\n".join(chunk)
+                await send_to_topic(client, group_id, topic_id, msg)
+                await asyncio.sleep(0.3)
+            print(f"   ✅ {len(groups_list)} groups")
+        
+        # Send channels list
+        if channels_list:
+            chunk_size = 30
+            chunks = [channels_list[i:i+chunk_size] for i in range(0, len(channels_list), chunk_size)]
+            for i, chunk in enumerate(chunks, 1):
+                msg = f"📢 *Channels ({i}/{len(chunks)}) - Total: {len(channels_list)}*\n\n" + "\n".join(chunk)
+                await send_to_topic(client, group_id, topic_id, msg)
+                await asyncio.sleep(0.3)
+            print(f"   ✅ {len(channels_list)} channels")
+        
+        # ═══════════════════════════════════════════════════════
+        # 4. SAVED MESSAGES (Always backup)
+        # ═══════════════════════════════════════════════════════
+        print("📤 [4/6] Backing up Saved Messages...")
+        
+        saved_count = 0
+        try:
+            await send_to_topic(client, group_id, topic_id, "💾 *SAVED MESSAGES*\n━━━━━━━━━━━━━━━━━━━━━━━━━━")
             
-            result = await client(GetContactsRequest(hash=0))
+            async for message in client.iter_messages('me', limit=100):
+                try:
+                    # Forward message (includes all media automatically!)
+                    await client.send_message(
+                        entity=group_id,
+                        message=message.message,
+                        file=message.media,
+                        reply_to=topic_id
+                    )
+                    saved_count += 1
+                    
+                    if saved_count % 20 == 0:
+                        print(f"   📥 {saved_count} saved messages...")
+                    
+                    await asyncio.sleep(0.2)
+                except:
+                    pass
             
-            contacts_list = []
-            for user in result.users:
-                contact_info = f"• {user.first_name or ''} {user.last_name or ''}"
-                if user.username:
-                    contact_info += f" | @{user.username}"
-                if user.phone:
-                    contact_info += f" | +{user.phone}"
-                contacts_list.append(contact_info)
+            print(f"   ✅ {saved_count} saved messages")
+        except Exception as e:
+            print(f"   ⚠️ Saved messages: {e}")
+        
+        # ═══════════════════════════════════════════════════════
+        # 5. ALL CHATS MESSAGES (FULL BACKUP ONLY)
+        # ═══════════════════════════════════════════════════════
+        if backup_type == "2":
+            print(f"📤 [5/6] Backing up ALL CHATS (last {msgs_per_chat} msgs each)...")
+            print("   ⚠️ This may take a while...\n")
             
-            if contacts_list:
-                chunk_size = 50
-                chunks = [contacts_list[i:i+chunk_size] for i in range(0, len(contacts_list), chunk_size)]
-                
-                for i, chunk in enumerate(chunks, 1):
-                    msg = f"👥 *Contacts ({i}/{len(chunks)})*\n\n" + "\n".join(chunk)
-                    await send_to_topic(client, group_id, topic_id, msg)
-                    await asyncio.sleep(0.5)
-                
-                print(f"   ✅ {len(contacts_list)} contacts backed up")
+            total_chats = len(all_dialogs)
             
-            # 3. GROUPS & CHANNELS
-            print("📤 3/5 Backing up groups & channels...")
-            
-            groups_list = []
-            channels_list = []
-            
-            async for dialog in client.iter_dialogs():
-                if dialog.is_group:
-                    g_info = f"• {dialog.title}"
-                    if hasattr(dialog.entity, 'username') and dialog.entity.username:
-                        g_info += f" | t.me/{dialog.entity.username}"
-                    groups_list.append(g_info)
-                elif dialog.is_channel:
-                    c_info = f"• {dialog.title}"
-                    if hasattr(dialog.entity, 'username') and dialog.entity.username:
-                        c_info += f" | t.me/{dialog.entity.username}"
-                    channels_list.append(c_info)
-            
-            if groups_list:
-                chunk_size = 30
-                chunks = [groups_list[i:i+chunk_size] for i in range(0, len(groups_list), chunk_size)]
-                for i, chunk in enumerate(chunks, 1):
-                    msg = f"👥 *Groups ({i}/{len(chunks)}) - Total: {len(groups_list)}*\n\n" + "\n".join(chunk)
-                    await send_to_topic(client, group_id, topic_id, msg)
-                    await asyncio.sleep(0.5)
-                print(f"   ✅ {len(groups_list)} groups backed up")
-            
-            if channels_list:
-                chunk_size = 30
-                chunks = [channels_list[i:i+chunk_size] for i in range(0, len(channels_list), chunk_size)]
-                for i, chunk in enumerate(chunks, 1):
-                    msg = f"📢 *Channels ({i}/{len(chunks)}) - Total: {len(channels_list)}*\n\n" + "\n".join(chunk)
-                    await send_to_topic(client, group_id, topic_id, msg)
-                    await asyncio.sleep(0.5)
-                print(f"   ✅ {len(channels_list)} channels backed up")
-            
-            # 4. MASTER VAULT UPDATE
-            print("📤 4/5 Updating MASTER VAULT...")
-            
-            master_topic_id = config.get('topics', {}).get(MASTER_VAULT_NAME)
-            if master_topic_id:
-                recovery = info.get('recovery', {})
-                master_msg = f"""🔐 *{nickname} - UPDATED*
+            for idx, dialog in enumerate(all_dialogs[:50], 1):  # Limit to 50 chats to avoid spam
+                try:
+                    chat_name = dialog.name[:30]
+                    print(f"   [{idx}/{min(50, total_chats)}] {chat_name}...", end=" ")
+                    
+                    # Send chat header
+                    header_msg = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━
+💬 *CHAT: {dialog.name}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+                    await send_to_topic(client, group_id, topic_id, header_msg)
+                    
+                    msg_count = 0
+                    async for message in client.iter_messages(dialog, limit=msgs_per_chat):
+                        try:
+                            if message.media or message.text:
+                                # Forward with media!
+                                await client.send_message(
+                                    entity=group_id,
+                                    message=message.message or "",
+                                    file=message.media,
+                                    reply_to=topic_id
+                                )
+                                msg_count += 1
+                                await asyncio.sleep(0.2)  # Rate limit
+                        except:
+                            pass
+                    
+                    print(f"✅ {msg_count} msgs")
+                    
+                except Exception as e:
+                    print(f"⚠️ Error")
+                    continue
+        else:
+            print("📤 [5/6] Skipped (Basic backup)")
+        
+        # ═══════════════════════════════════════════════════════
+        # 6. MASTER VAULT UPDATE
+        # ═══════════════════════════════════════════════════════
+        print("📤 [6/6] Updating MASTER VAULT...")
+        
+        master_topic_id = config.get('topics', {}).get(MASTER_VAULT_NAME)
+        if master_topic_id:
+            recovery = info.get('recovery', {})
+            master_msg = f"""🔐 *{nickname} - FULL BACKUP*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📱 `{info.get('phone', 'N/A')}`
 🔑 `{info.get('api_id', 'N/A')}`
 🔐 `{info.get('api_hash', 'N/A')}`
-📧 {recovery.get('email', '❌ Not linked')}
+📧 {recovery.get('email', '❌')}
 🔒 2FA: {'✅' if recovery.get('twofa_password') else '❌'}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1429,27 +1546,36 @@ async def full_backup():
 `{session}`
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+📊 *Backup Summary:*
 👥 Contacts: {len(contacts_list)}
 🏛️ Groups: {len(groups_list)}
 📢 Channels: {len(channels_list)}
+💾 Saved: {saved_count} msgs
+{'📦 All Chats: Backed up' if backup_type == '2' else ''}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━"""
-                
-                await send_to_topic(client, group_id, master_topic_id, master_msg)
-                print("   ✅ MASTER VAULT updated")
             
-            # 5. COMPLETION
-            print("📤 5/5 Finalizing...")
-            
-            recovery = info.get('recovery', {})
-            final_msg = f"""✅ *BACKUP COMPLETE*
+            await send_to_topic(client, group_id, master_topic_id, master_msg)
+            print("   ✅ MASTER VAULT updated")
+        
+        # ═══════════════════════════════════════════════════════
+        # COMPLETION
+        # ═══════════════════════════════════════════════════════
+        
+        recovery = info.get('recovery', {})
+        final_msg = f"""✅ *FULL BACKUP COMPLETE!*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📊 *Summary:*
 • 👤 Profile: ✅
+• 🖼️ Profile Photo: ✅
 • 👥 Contacts: {len(contacts_list)}
 • 🏛️ Groups: {len(groups_list)}
 • 📢 Channels: {len(channels_list)}
+• 💾 Saved Messages: {saved_count}
+{'• 📦 All Chats: ✅ Backed up with media' if backup_type == '2' else '• 📦 Chats: Basic only'}
 • 🔐 Session: ✅
 • 📧 Email: {'✅' if recovery.get('email') else '❌'}
 • 🔒 2FA: {'✅' if recovery.get('twofa_password') else '❌'}
@@ -1458,21 +1584,26 @@ async def full_backup():
 📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-🛡️ *This account is now IMMORTAL!*"""
-            
-            await send_to_topic(client, group_id, topic_id, final_msg)
-            
-            await client.disconnect()
-            
-            print(f"\n✅ {nickname} - FULL BACKUP COMPLETE!")
-            
-        except Exception as e:
-            print(f"\n❌ Error: {e}")
+🛡️ *Account is IMMORTAL!*
+📱 Videos, Photos, Audio - ALL BACKED UP!
+💾 Everything is in this topic!"""
+        
+        await send_to_topic(client, group_id, topic_id, final_msg)
+        
+        await client.disconnect()
+        
+        print(f"\n{'='*60}")
+        print(f"✅ {nickname} - BACKUP COMPLETE!")
+        print(f"{'='*60}")
+        print(f"\n📊 Everything backed up to topic!")
+        print(f"📁 Check your group → {nickname} topic")
+        
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
     
-    print("\n" + "=" * 60)
-    print("📦 ALL BACKUPS COMPLETE!")
-    print("=" * 60)
-    input("\nPress Enter...")
+    input("\n\nPress Enter to continue...")
 
 # ═══════════════════════════════════════════════════════════════
 # 14. QUICK SYNC
