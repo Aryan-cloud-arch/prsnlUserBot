@@ -1605,6 +1605,407 @@ async def full_backup():
     
     input("\n\nPress Enter to continue...")
 
+
+# ═══════════════════════════════════════════════════════════════
+# 15. SELECTIVE CHAT BACKUP
+# ═══════════════════════════════════════════════════════════════
+
+async def selective_backup():
+    """Backup specific chats only - choose what you want!"""
+    header("📋 SELECTIVE CHAT BACKUP")
+    
+    accounts = load_accounts()
+    config = load_config()
+    group_id = config.get("group_id")
+    
+    if not accounts:
+        print("\n⚠️ No accounts!")
+        input("\nPress Enter...")
+        return
+    
+    if not group_id:
+        print("\n❌ Group not connected!")
+        input("\nPress Enter...")
+        return
+    
+    print("\n📋 Select account:\n")
+    for i, name in enumerate(accounts.keys(), 1):
+        print(f"   {i}. {name}")
+    
+    choice = input("\nEnter nickname: ").strip()
+    
+    if choice not in accounts:
+        print(f"\n❌ '{choice}' not found!")
+        input("\nPress Enter...")
+        return
+    
+    nickname = choice
+    info = accounts[nickname]
+    session = info.get('session_string')
+    
+    if not session:
+        print(f"\n⚠️ No session!")
+        input("\nPress Enter...")
+        return
+    
+    print("\n⏳ Loading chats...")
+    
+    try:
+        client = TelegramClient(
+            StringSession(session),
+            info['api_id'],
+            info['api_hash']
+        )
+        await client.connect()
+        
+        if not await client.is_user_authorized():
+            print("❌ Session expired")
+            await client.disconnect()
+            input("\nPress Enter...")
+            return
+        
+        topic_id = info.get('topic_id')
+        
+        if not topic_id:
+            topic_name = f"📱 {nickname}"
+            topic_id = await get_or_create_topic(client, group_id, topic_name)
+            accounts[nickname]['topic_id'] = topic_id
+            save_accounts(accounts)
+        
+        # ═══════════════════════════════════════════════════════
+        # CATEGORIZE CHATS
+        # ═══════════════════════════════════════════════════════
+        
+        print("📂 Categorizing chats...")
+        
+        groups_dict = {}
+        channels_dict = {}
+        personal_dict = {}
+        bots_dict = {}
+        
+        async for dialog in client.iter_dialogs():
+            if dialog.is_group:
+                groups_dict[dialog.id] = {
+                    'dialog': dialog,
+                    'name': dialog.name,
+                    'username': dialog.entity.username if hasattr(dialog.entity, 'username') else None
+                }
+            elif dialog.is_channel:
+                channels_dict[dialog.id] = {
+                    'dialog': dialog,
+                    'name': dialog.name,
+                    'username': dialog.entity.username if hasattr(dialog.entity, 'username') else None
+                }
+            elif dialog.is_user:
+                if dialog.entity.bot:
+                    bots_dict[dialog.id] = {
+                        'dialog': dialog,
+                        'name': dialog.name,
+                        'username': dialog.entity.username if hasattr(dialog.entity, 'username') else None
+                    }
+                else:
+                    personal_dict[dialog.id] = {
+                        'dialog': dialog,
+                        'name': dialog.name,
+                        'username': dialog.entity.username if hasattr(dialog.entity, 'username') else None
+                    }
+        
+        # ═══════════════════════════════════════════════════════
+        # STEP 1: CHOOSE CATEGORY
+        # ═══════════════════════════════════════════════════════
+        
+        while True:
+            header("📋 SELECT CHAT TYPE")
+            
+            print(f"\n📊 Your Chats:\n")
+            print(f"   1. 👥 Groups ({len(groups_dict)})")
+            print(f"   2. 📢 Channels ({len(channels_dict)})")
+            print(f"   3. 💬 Personal DMs ({len(personal_dict)})")
+            print(f"   4. 🤖 Bots ({len(bots_dict)})")
+            print(f"   5. 💾 Saved Messages")
+            print(f"   6. ⬅️  Back")
+            
+            category = input("\nSelect type: ").strip()
+            
+            if category == "6":
+                await client.disconnect()
+                return
+            
+            # ═══════════════════════════════════════════════════════
+            # STEP 2: CHOOSE SPECIFIC CHATS
+            # ═══════════════════════════════════════════════════════
+            
+            selected_chats = []
+            
+            if category == "1":
+                selected_chats = await select_chats_from_category(groups_dict, "GROUPS")
+            elif category == "2":
+                selected_chats = await select_chats_from_category(channels_dict, "CHANNELS")
+            elif category == "3":
+                selected_chats = await select_chats_from_category(personal_dict, "PERSONAL DMs")
+            elif category == "4":
+                selected_chats = await select_chats_from_category(bots_dict, "BOTS")
+            elif category == "5":
+                # Saved messages
+                selected_chats = [{'dialog': 'me', 'name': 'Saved Messages'}]
+            else:
+                print("\n❌ Invalid choice!")
+                await asyncio.sleep(1)
+                continue
+            
+            if not selected_chats:
+                continue
+            
+            # ═══════════════════════════════════════════════════════
+            # STEP 3: HOW MANY MESSAGES
+            # ═══════════════════════════════════════════════════════
+            
+            print(f"\n📊 Selected {len(selected_chats)} chat(s)")
+            
+            msgs_limit = input("\nMessages per chat (default 50, max 1000): ").strip()
+            msgs_limit = int(msgs_limit) if msgs_limit.isdigit() else 50
+            msgs_limit = min(msgs_limit, 1000)
+            
+            print(f"\n⚠️ Will backup:")
+            for chat in selected_chats:
+                print(f"   • {chat['name'][:40]} — Last {msgs_limit} msgs")
+            
+            confirm = input("\n📤 Start backup? (yes/no): ").strip().lower()
+            
+            if confirm != 'yes':
+                continue
+            
+            # ═══════════════════════════════════════════════════════
+            # STEP 4: BACKUP SELECTED CHATS
+            # ═══════════════════════════════════════════════════════
+            
+            print(f"\n{'='*60}")
+            print(f"📦 BACKING UP SELECTED CHATS")
+            print(f"{'='*60}\n")
+            
+            total_msgs = 0
+            
+            for idx, chat_info in enumerate(selected_chats, 1):
+                try:
+                    chat_name = chat_info['name'][:40]
+                    dialog = chat_info['dialog']
+                    
+                    print(f"[{idx}/{len(selected_chats)}] 📤 {chat_name}...", end=" ", flush=True)
+                    
+                    # Send chat header
+                    header_msg = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━
+💬 *CHAT: {chat_info['name']}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 Backing up last {msgs_limit} messages
+📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+                    
+                    await send_to_topic(client, group_id, topic_id, header_msg)
+                    
+                    # Backup messages
+                    msg_count = 0
+                    async for message in client.iter_messages(dialog, limit=msgs_limit):
+                        try:
+                            # Forward message with media!
+                            if message.media or message.text:
+                                await client.send_message(
+                                    entity=group_id,
+                                    message=message.message or "",
+                                    file=message.media,
+                                    reply_to=topic_id
+                                )
+                                msg_count += 1
+                                total_msgs += 1
+                                await asyncio.sleep(0.15)  # Rate limit
+                        except Exception as e:
+                            pass
+                    
+                    print(f"✅ {msg_count} msgs")
+                    
+                except Exception as e:
+                    print(f"❌ Error: {e}")
+                    continue
+            
+            # ═══════════════════════════════════════════════════════
+            # COMPLETION
+            # ═══════════════════════════════════════════════════════
+            
+            completion_msg = f"""✅ *SELECTIVE BACKUP COMPLETE!*
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 *Summary:*
+• 💬 Chats backed up: {len(selected_chats)}
+• 📨 Total messages: {total_msgs}
+• 📷 Media: Included (photos, videos, docs, etc.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+            
+            await send_to_topic(client, group_id, topic_id, completion_msg)
+            
+            print(f"\n{'='*60}")
+            print(f"✅ BACKUP COMPLETE!")
+            print(f"{'='*60}")
+            print(f"\n📊 {total_msgs} messages backed up from {len(selected_chats)} chats")
+            print(f"📁 Check topic: {nickname}")
+            
+            another = input("\n📋 Backup more chats? (yes/no): ").strip().lower()
+            if another != 'yes':
+                break
+        
+        await client.disconnect()
+        
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    input("\n\nPress Enter to continue...")
+
+# ═══════════════════════════════════════════════════════════════
+# HELPER: SELECT CHATS FROM CATEGORY
+# ═══════════════════════════════════════════════════════════════
+
+async def select_chats_from_category(chats_dict, category_name):
+    """Helper to select specific chats from a category"""
+    
+    if not chats_dict:
+        print(f"\n⚠️ No {category_name} found!")
+        await asyncio.sleep(1)
+        return []
+    
+    header(f"SELECT {category_name}")
+    
+    # Convert to list for indexing
+    chats_list = list(chats_dict.values())
+    
+    # Show paginated list
+    page_size = 20
+    total_pages = (len(chats_list) + page_size - 1) // page_size
+    current_page = 0
+    
+    while True:
+        clear()
+        print("=" * 60)
+        print(f"  SELECT {category_name} - Page {current_page + 1}/{total_pages}")
+        print("=" * 60)
+        
+        start_idx = current_page * page_size
+        end_idx = min(start_idx + page_size, len(chats_list))
+        
+        print(f"\n📋 Showing {start_idx + 1}-{end_idx} of {len(chats_list)}:\n")
+        
+        for i in range(start_idx, end_idx):
+            chat = chats_list[i]
+            username_str = f"(@{chat['username']})" if chat.get('username') else ""
+            print(f"   {i+1}. {chat['name'][:35]} {username_str}")
+        
+        print("\n" + "-" * 60)
+        print("\n📌 Options:")
+        print("   • Enter numbers: 1,3,5 or 1-10")
+        print("   • Type 'all' for all chats")
+        print("   • Type 'n' for next page")
+        print("   • Type 'p' for previous page")
+        print("   • Type 'search' to search")
+        print("   • Type 'cancel' to go back")
+        
+        choice = input("\nYour selection: ").strip().lower()
+        
+        if choice == 'cancel':
+            return []
+        
+        if choice == 'n':
+            if current_page < total_pages - 1:
+                current_page += 1
+            continue
+        
+        if choice == 'p':
+            if current_page > 0:
+                current_page -= 1
+            continue
+        
+        if choice == 'search':
+            search_term = input("\n🔍 Search: ").strip().lower()
+            filtered = []
+            for chat in chats_list:
+                if search_term in chat['name'].lower():
+                    filtered.append(chat)
+            
+            if filtered:
+                print(f"\n📋 Found {len(filtered)} matches:\n")
+                for i, chat in enumerate(filtered[:20], 1):
+                    print(f"   {i}. {chat['name'][:40]}")
+                
+                nums = input("\nSelect (e.g., 1,3,5): ").strip()
+                try:
+                    indices = parse_selection(nums, len(filtered))
+                    selected = [filtered[i-1] for i in indices if 0 < i <= len(filtered)]
+                    if selected:
+                        return selected
+                except:
+                    print("\n❌ Invalid selection!")
+                    await asyncio.sleep(1)
+            else:
+                print("\n⚠️ No matches!")
+                await asyncio.sleep(1)
+            continue
+        
+        if choice == 'all':
+            confirm = input(f"\n⚠️ Backup ALL {len(chats_list)} chats? (yes/no): ").strip().lower()
+            if confirm == 'yes':
+                return chats_list
+            continue
+        
+        # Parse number selection
+        try:
+            indices = parse_selection(choice, len(chats_list))
+            selected = [chats_list[i-1] for i in indices if 0 < i <= len(chats_list)]
+            
+            if selected:
+                print(f"\n✅ Selected {len(selected)} chat(s):")
+                for chat in selected[:5]:
+                    print(f"   • {chat['name'][:40]}")
+                if len(selected) > 5:
+                    print(f"   ... and {len(selected) - 5} more")
+                
+                confirm = input("\n📤 Backup these? (yes/no): ").strip().lower()
+                if confirm == 'yes':
+                    return selected
+            else:
+                print("\n❌ No valid chats selected!")
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            print(f"\n❌ Invalid selection! {e}")
+            await asyncio.sleep(1)
+
+def parse_selection(selection_str, max_num):
+    """Parse selection string like '1,3,5' or '1-10' into list of numbers"""
+    indices = set()
+    
+    parts = selection_str.split(',')
+    for part in parts:
+        part = part.strip()
+        
+        if '-' in part:
+            # Range: 1-10
+            try:
+                start, end = part.split('-')
+                start = int(start.strip())
+                end = int(end.strip())
+                indices.update(range(start, end + 1))
+            except:
+                pass
+        else:
+            # Single number
+            try:
+                indices.add(int(part))
+            except:
+                pass
+    
+    return sorted([i for i in indices if 1 <= i <= max_num])
+
 # ═══════════════════════════════════════════════════════════════
 # 14. QUICK SYNC
 # ═══════════════════════════════════════════════════════════════
